@@ -1,0 +1,235 @@
+------------------------------------------------------------------------------
+-- Package: GenJava
+-- Based on the TSSIPACK package procedure, generate the necessary java files
+-- to have the web app component automatically coded.
+--
+-- Author: Juan Arce and the team from TSSI UTN-FRSN 2013
+--
+-- Create global temporary table javacode( text varchar2(1024)) on commit delete rows;
+-- All code is inserted in the global temp table
+-- The idea is: you execute the package.procedure
+-- select from the global table spooling to the xxx.java file
+-- commit; to release the memory
+-- compile the java file
+------------------------------------------------------------------------------
+create or replace package GenJava as
+type T_REC is RECORD(pos number, sequence number, name varchar2(100), datatype varchar2(200), direction varchar2(20), java_type varchar2(30));
+type T_REC_TAB is TABLE OF T_REC;
+recs T_REC_TAB;
+Procedure Model(pi_package in varchar2, pi_object in varchar2);
+Procedure Controller(pi_package in varchar2, pi_object in varchar2);
+Procedure Xml(pi_package in varchar2, pi_object in varchar2);
+Procedure JavaDoc(pi_package in varchar2, pi_object in varchar2, recs T_REC_TAB, fn in varchar2);
+End GenJava;
+/
+show errors
+
+create or replace package body GenJava as
+Procedure Model(pi_package in varchar2, pi_object in varchar2) is
+
+vConstParms varchar2(300) := NULL;
+vStr varchar2(300) := NULL;
+vSql varchar2(500) := NULL;
+
+Begin
+	select position,sequence,argument_name,data_type, in_out,
+	decode(data_type,'VARCHAR2','String','NUMBER','int','REF CURSOR','ResultSet','Object') java_type
+	bulk collect into recs
+	from user_arguments
+	where object_name = pi_object
+	  and package_name = pi_package
+	order by position;
+
+	insert into javacode(text) values ('package com.tssi.model;'||chr(10));
+	insert into javacode(text) values ('import java.sql.*;');
+	insert into javacode(text) values ('import oracle.jdbc.OracleTypes;');
+
+	JavaDoc(pi_package,pi_object, recs, 'MODEL');
+
+	insert into javacode(text) values (chr(10)||'public class '||initcap(pi_object)||' {');
+	insert into javacode(text) values (chr(9)||'Connection conn;');
+
+	for i in recs.first..recs.last loop
+		insert into javacode(text) values (chr(9)||recs(i).java_type||' '||nvl(lower(recs(i).name),'rs')||';');
+	end loop;
+	
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'IN' then
+			if vConstParms is NULL then
+				vConstParms := ','||recs(i).java_type||' '||lower(recs(i).name);
+			else
+				vConstParms := vConstParms||','||recs(i).java_type||' '||lower(recs(i).name);
+			end if;
+		end if;
+		if vConstParms != '' then
+			vConstParms := vConstParms||')';
+		end if;
+	end loop;
+	
+	insert into javacode(text) values (chr(10)||chr(9)||'public '||initcap(pi_object)||'(Connection conn'||vConstParms||') throws SQLException {');
+	insert into javacode(text) values (chr(9)||chr(9)||'this.conn = conn;');
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'IN' then
+			insert into javacode(text) values (chr(9)||chr(9)||'this.'||lower(recs(i).name)||' = '||lower(recs(i).name)||';');
+		end if;
+	end loop;
+	insert into javacode(text) values (chr(9)||'}');
+
+	vStr := NULL;
+	insert into javacode(text) values (chr(10)||chr(9)||'public ResultSet getCursor() throws SQLException {');
+	vSql := chr(9)||chr(9)||'String sql = "begin';
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'OUT' and recs(i).java_type = 'ResultSet' and recs(i).pos = 0 then
+			vSql := vsql||' ? := '||lower(pi_package)||'.'||lower(pi_object);
+		elsif recs(i).direction = 'IN' and recs(i).pos > 0 then
+			if vStr is NULL then
+				vStr := '(?';
+			else 
+				vStr := vStr||',?';
+			end if;
+		end if;
+	end loop;
+	if vStr is not NULL then
+		vSql := vSql||vStr||'); end;";';
+	else
+		vSql := vSql||'; end;";';
+	end if;
+	insert into javacode(text) values (vSql);
+	insert into javacode(text) values (chr(9)||chr(9)||'CallableStatement stmt = conn.prepareCall(sql);');
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'OUT' and recs(i).java_type = 'ResultSet' then
+			insert into javacode(text) values (chr(9)||chr(9)||'stmt.registerOutParameter('||to_char(recs(i).pos + 1)||',OracleTypes.CURSOR);');
+		elsif recs(i).direction = 'IN' then
+			insert into javacode(text) values (chr(9)||chr(9)||'stmt.set'||initcap(recs(i).java_type)||'('||to_char(recs(i).pos + 1)||','||lower(recs(i).name)||');');
+		end if;
+	end loop;
+
+	insert into javacode(text) values (chr(9)||chr(9)||'stmt.execute();');
+	insert into javacode(text) values (chr(9)||chr(9)||'rs = (ResultSet)stmt.getObject(1);');
+	insert into javacode(text) values (chr(9)||chr(9)||'return rs;');
+	insert into javacode(text) values (chr(9)||'}');
+	insert into javacode(text) values ('}');
+End Model;
+
+Procedure Controller(pi_package in varchar2, pi_object in varchar2) is
+
+vConstParms varchar2(300) := NULL;
+vStr varchar2(300) := NULL;
+vSql varchar2(500) := NULL;
+vparams varchar2(500) := NULL;
+
+Begin
+	select position,sequence,argument_name,data_type, in_out,
+	decode(data_type,'VARCHAR2','String','NUMBER','int','REF CURSOR','ResultSet','Object') java_type
+	bulk collect into recs
+	from user_arguments
+	where object_name = pi_object
+	  and package_name = pi_package
+	order by position;
+	
+	insert into javacode(text) values ('package com.tssi.controller;'||chr(10));
+	insert into javacode(text) values ('import com.tssi.model.'||initcap(pi_object)||';');
+	insert into javacode(text) values ('import javax.servlet.*;');
+	insert into javacode(text) values ('import javax.servlet.http.*;');
+	insert into javacode(text) values ('import java.io.*;');
+	insert into javacode(text) values ('import javax.naming.*;');
+	insert into javacode(text) values ('import javax.sql.*;');
+	insert into javacode(text) values ('import java.sql.*;');
+	
+	JavaDoc(pi_package,pi_object, recs, 'CONTROLLER');
+
+	insert into javacode(text) values (chr(10)||'public class '||initcap(pi_object)||'Servlet extends HttpServlet {');
+
+	insert into javacode(text) values (chr(9)||'InitialContext ictx;');
+	insert into javacode(text) values (chr(9)||'Context ctx;');
+	insert into javacode(text) values (chr(9)||'DataSource ds;');
+	insert into javacode(text) values (chr(9)||'Connection conn;');
+	insert into javacode(text) values (chr(9)||'PrintWriter out;');
+	
+	insert into javacode(text) values (chr(10)||chr(9)||'public void init(ServletConfig config) throws ServletException {');
+	insert into javacode(text) values (chr(9)||chr(9)||'super.init(config);');
+	insert into javacode(text) values (chr(9)||chr(9)||'try {');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'ictx = new InitialContext();');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'System.err.println("init() - InitialContext");');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'ctx = (Context)ictx.lookup("java:comp/env");');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'System.err.println("init() - Context");');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'ds = (DataSource)ctx.lookup("jdbc/dell");');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'System.err.println("init() - DataSource");');
+	insert into javacode(text) values (chr(9)||chr(9)||'} catch (NamingException ne) {');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'System.err.println("'||initcap(pi_object)||'Servlet.init() - " + ne.getMessage());');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'ne.printStackTrace();');
+	insert into javacode(text) values (chr(9)||chr(9)||'}');
+	insert into javacode(text) values (chr(9)||'}');
+		
+	insert into javacode(text) values (chr(10)||chr(9)||'public void doGet(HttpServletRequest request, HttpServletResponse response) {');
+	insert into javacode(text) values (chr(9)||chr(9)||'try {');
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'IN' then
+			insert into javacode(text) values (chr(9)||chr(9)||chr(9)||recs(i).java_type||' '||lower(recs(i).name)||';');
+		end if;
+	end loop;
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'out = response.getWriter();');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'conn = ds.getConnection();');
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'IN' then
+			insert into javacode(text) values (chr(9)||chr(9)||chr(9)||lower(recs(i).name)||' = '||'request.getParameter("'||lower(recs(i).name)||'");');
+		end if;
+	end loop;
+	
+	for i in recs.first..recs.last loop
+		if recs(i).direction = 'IN' then
+			if vparams is NULL then
+				vparams := 'conn,'||lower(recs(i).name);
+			else
+				vparams := vparams||','||lower(recs(i).name);
+			end if;
+		end if;
+	end loop;
+	
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||initcap(pi_object)||' '||lower(pi_object)||' = new '||initcap(pi_object)||'('||vparams||');');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'ResultSet rs = '||lower(pi_object)||'.getCursor();');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'request.setAttribute("rs",rs);');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'request.setAttribute("conn",conn);');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'getServletContext().getRequestDispatcher("/'||initcap(pi_object)||'.jsp").forward(request,response);');
+	insert into javacode(text) values (chr(9)||chr(9)||'} catch (Exception e) {');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'System.err.println("'||initcap(pi_object)||'Servlet.doGet() - " + e.getMessage());');
+	insert into javacode(text) values (chr(9)||chr(9)||chr(9)||'e.printStackTrace();');
+	insert into javacode(text) values (chr(9)||chr(9)||'}');
+	insert into javacode(text) values (chr(9)||'}');
+	insert into javacode(text) values ('}');
+End Controller;
+
+Procedure Xml(pi_package in varchar2, pi_object in varchar2) is
+Begin
+	insert into javacode(text) values (chr(9)||'<servlet>');
+	insert into javacode(text) values (chr(9)||chr(9)||'<servlet-name>'||initcap(pi_object)||' Servlet</servlet-name>');
+	insert into javacode(text) values (chr(9)||chr(9)||'<servlet-class>'||initcap(pi_object)||'Servlet</servlet-class>');
+	insert into javacode(text) values (chr(9)||'</servlet>');
+
+	insert into javacode(text) values (chr(9)||'<servlet-mapping>');
+	insert into javacode(text) values (chr(9)||chr(9)||'<servlet-name>'||initcap(pi_object)||' Servlet</servlet-name>');
+	insert into javacode(text) values (chr(9)||chr(9)||'<url-pattern>/'||initcap(pi_object)||'Servlet</url-pattern>');
+	insert into javacode(text) values (chr(9)||'</servlet-mapping>');
+End Xml;
+
+Procedure JavaDoc(pi_package in varchar2, pi_object in varchar2, recs T_REC_TAB, fn in varchar2) is
+Begin
+	insert into javacode(text) values (chr(10));
+	insert into javacode(text) values ('/**');
+	if fn = 'MODEL' then
+		insert into javacode(text) values (' *@name: '||initcap(pi_object));
+	else
+		insert into javacode(text) values (' *@name: '||initcap(pi_object)||'Servlet');
+		insert into javacode(text) values (' *@see: The Model class '||initcap(pi_object));
+	end if;
+	insert into javacode(text) values (' *@author: Juan Arce and the UTN-FRSN TSSI 2013 gang');
+	insert into javacode(text) values (' *@version: 1.0');
+	for i in recs.first..recs.last loop
+		insert into javacode(text) values (' *@param: '||to_char(recs(i).pos + 1)||' '||nvl(lower(recs(i).name),'Defined in code')||' '||recs(i).direction||' '||recs(i).java_type);
+	end loop;
+	insert into javacode(text) values (' */');
+End JavaDoc;
+
+End GenJava;
+/
+show errors
